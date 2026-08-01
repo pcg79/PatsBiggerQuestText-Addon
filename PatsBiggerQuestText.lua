@@ -104,6 +104,25 @@ local function GetGossipScrollBox()
     return nil
 end
 
+-- Resize every FontString on a single gossip scroll element (the greeting
+-- paragraph, an option row, a quest row, etc.).
+local function ResizeGossipFrame(frame, size)
+    if not frame then return end
+    -- Button label (option / quest rows are buttons).
+    if frame.GetFontString then
+        ResizeFontString(frame:GetFontString(), size)
+    end
+    -- Any other FontString regions on the element.
+    if frame.GetRegions then
+        for _, region in ipairs({ frame:GetRegions() }) do
+            if region.GetObjectType and region:GetObjectType() == "FontString" then
+                ResizeFontString(region, size)
+            end
+        end
+    end
+end
+
+local gossipRelayout = false
 local function ResizeGossip()
     local scrollBox, panel = GetGossipScrollBox()
     local size = GetSize()
@@ -113,22 +132,22 @@ local function ResizeGossip()
         ResizeFontString(panel.GreetingText, size)
     end
 
-    if not scrollBox or not scrollBox.GetFrames then return end
-    local frames = scrollBox:GetFrames()
-    if not frames then return end
-    for _, frame in ipairs(frames) do
-        -- Button label (option / quest rows are buttons).
-        if frame.GetFontString then
-            ResizeFontString(frame:GetFontString(), size)
+    if not scrollBox then return end
+
+    if scrollBox.GetFrames then
+        for _, frame in ipairs(scrollBox:GetFrames()) do
+            ResizeGossipFrame(frame, size)
         end
-        -- Any other FontString regions on the element.
-        if frame.GetRegions then
-            for _, region in ipairs({ frame:GetRegions() }) do
-                if region.GetObjectType and region:GetObjectType() == "FontString" then
-                    ResizeFontString(region, size)
-                end
-            end
-        end
+    end
+
+    -- Re-run the scroll layout so element heights are re-measured against the
+    -- new (persistent) font sizes. Without this the taller greeting paragraph
+    -- overflows into the option rows anchored beneath it. Guarded so the
+    -- re-layout (which re-initializes frames) can't recurse.
+    if scrollBox.FullUpdate and not gossipRelayout then
+        gossipRelayout = true
+        scrollBox:FullUpdate(ScrollBoxConstants and ScrollBoxConstants.UpdateImmediately or true)
+        gossipRelayout = false
     end
 end
 
@@ -137,6 +156,14 @@ local function TryHookGossip()
     if gossipHooked then return end
     if GossipFrame and type(GossipFrame.Update) == "function" then
         hooksecurefunc(GossipFrame, "Update", ResizeGossip)
+        -- Resize each element as it's (re)initialized, so newly created or
+        -- recycled scroll frames carry the right font *before* they're measured.
+        local scrollBox = GetGossipScrollBox()
+        if scrollBox and ScrollUtil and ScrollUtil.AddInitializedFrameCallback then
+            ScrollUtil.AddInitializedFrameCallback(scrollBox, function(frame)
+                ResizeGossipFrame(frame, GetSize())
+            end, scrollBox, true)
+        end
         gossipHooked = true
     end
 end
