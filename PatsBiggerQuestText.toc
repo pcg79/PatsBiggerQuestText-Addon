@@ -2,7 +2,7 @@
 ## Title: Pat's Bigger Quest Text
 ## Notes: Increases the size of quest description and objective text in the quest dialog window.
 ## Author: Pat
-## Version: 1.0
+## Version: 1.0.1
 ## SavedVariables: PBQT_DB
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 
