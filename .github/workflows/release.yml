@@ -18,7 +18,7 @@ jobs:
       GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }} # auto-provided by GitHub Actions
     steps:
       - name: Clone project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0 # full history so the changelog can be generated
 
