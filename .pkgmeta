@@ -1,0 +1,4 @@
+# Force the packaged addon folder name to match the .toc (the GitHub repo is
+# named "PatsBiggerQuestText-Addon", but WoW needs the folder to be
+# "PatsBiggerQuestText").
+package-as: PatsBiggerQuestText

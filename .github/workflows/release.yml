@@ -1,0 +1,24 @@
+name: Package and release
+
+# Runs when you push an annotated tag (e.g. `git tag -a v1.1 -m "..." && git push --tags`).
+on:
+  push:
+    tags:
+      - '**'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # lets the packager create the GitHub release
+    env:
+      CF_API_KEY: ${{ secrets.CF_API_KEY }} # add this in repo Settings → Secrets
+      GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }} # auto-provided by GitHub Actions
+    steps:
+      - name: Clone project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the changelog can be generated
+
+      - name: Package and release
+        uses: BigWigsMods/packager@v2
