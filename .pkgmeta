@@ -2,3 +2,10 @@
 # named "PatsBiggerQuestText-Addon", but WoW needs the folder to be
 # "PatsBiggerQuestText").
 package-as: PatsBiggerQuestText
+
+enable-nolib-creation: no
+
+ignore:
+  - .github
+  - .gitignore
+  - README.md

@@ -12,7 +12,9 @@ jobs:
     permissions:
       contents: write # lets the packager create the GitHub release
     env:
-      CF_API_KEY: ${{ secrets.CF_API_KEY }} # add this in repo Settings → Secrets
+      # No CF_API_KEY on purpose: CurseForge imports releases via its GitHub
+      # integration (linked on the CurseForge side). Adding a key here would
+      # direct-upload as well and double-publish.
       GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }} # auto-provided by GitHub Actions
     steps:
       - name: Clone project
