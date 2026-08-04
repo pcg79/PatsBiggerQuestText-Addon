@@ -9,3 +9,6 @@ ignore:
   - .github
   - .gitignore
   - README.md
+  - "*.png"
+  - "*.jpg"
+  - "*.jpeg"
