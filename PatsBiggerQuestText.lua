@@ -28,6 +28,22 @@ local FONT_STRINGS = {
     "QuestProgressText",        -- text shown when returning before completion
 }
 
+-- Global FONT OBJECTS used by the quest and (crucially) the gossip frame.
+-- The gossip window is a scroll list whose row heights are computed by an
+-- "extent calculator" that reads these font objects -- NOT the individual
+-- FontStrings. So resizing instances alone made rows render big while the
+-- layout still budgeted the old height, causing overlap. Resizing the objects
+-- keeps rendering and measurement in sync. Names confirmed via /pbqt debug:
+-- QuestFont (gossip greeting / quest body), QuestFontLeft (gossip options).
+-- The rest are guarded by existence and only affect quest/gossip text.
+local FONT_OBJECTS = {
+    "QuestFont",
+    "QuestFontLeft",
+    "QuestFontNormalSmall",
+    "QuestFontHighlight",
+    "GossipFont",
+}
+
 -- Forward declaration so the slash handler can refresh the options sliders.
 local RefreshControls
 
@@ -56,10 +72,28 @@ end
 
 -- Apply the window scale to the quest and gossip frames. SetScale persists
 -- across shows, so calling this once (and on change) is enough per frame.
+--
+-- Touching a Blizzard frame from addon code taints that frame, and GossipFrame
+-- is registered with UIWidgetManager as a widget-set container -- so a tainted
+-- GossipFrame leaks our taint into unrelated widget passes (map POI tooltips
+-- and the like). Keep the blast radius as small as possible: never call
+-- SetScale at the default scale, and never call it redundantly.
+local scaleTouched = false
+
+local function ApplyScaleTo(frame, s)
+    if not frame or not frame.SetScale then return end
+    if frame.GetScale and math.abs((frame:GetScale() or 1) - s) < 0.001 then return end
+    frame:SetScale(s)
+end
+
 local function ApplyScale()
     local s = GetScale()
-    if QuestFrame and QuestFrame.SetScale then QuestFrame:SetScale(s) end
-    if GossipFrame and GossipFrame.SetScale then GossipFrame:SetScale(s) end
+    -- Players who never move the slider off 1.0 pay no taint cost at all. Once
+    -- we have scaled a frame we must keep applying, so 2.0 -> 1.0 still resets.
+    if s == DEFAULT_SCALE and not scaleTouched then return end
+    scaleTouched = true
+    ApplyScaleTo(QuestFrame, s)
+    ApplyScaleTo(GossipFrame, s)
 end
 
 -- Re-set a FontString's height while preserving its font file and flags, so the
@@ -79,6 +113,42 @@ local function ApplyFontSizes()
     end
 end
 
+-- Resize the global quest/gossip font objects to the current size, preserving
+-- each object's font file and flags. Returns true if any object's size actually
+-- changed -- the caller uses that to decide whether a re-layout is needed (the
+-- gossip extent calculator will have already run with the old metrics).
+local function ApplyFontObjects()
+    local size = GetSize()
+    local changed = false
+    for _, name in ipairs(FONT_OBJECTS) do
+        local obj = _G[name]
+        if obj and obj.GetFont then
+            local file, cur, flags = obj:GetFont()
+            if file and cur ~= size then
+                obj:SetFont(file, size, flags)
+                changed = true
+            end
+        end
+    end
+    return changed
+end
+
+-- NOTE: we deliberately never call GossipFrame:Update() (or ScrollBox:FullUpdate)
+-- ourselves to force a re-render after a size change.
+--
+-- GossipFrameMixin:Update registers gossip widget sets with the shared
+-- UIWidgetManager. Driving it from addon code runs that registration under our
+-- taint, which writes our taint into the widget manager's internal tables --
+-- and every later widget pass that reads them then runs tainted too, including
+-- the map area-POI tooltips. Since 12.0 added secret values, tainted execution
+-- can no longer do arithmetic on the widget templates' measured text heights,
+-- so that showed up as a hard Lua error on map mouseover.
+--
+-- Font objects are persistent, so pre-sizing them (at login, and whenever the
+-- setting changes) is enough for every gossip window opened afterwards. The
+-- only case we give up is re-flowing a window that is already on screen when
+-- the size changes; that now takes effect the next time the window opens.
+
 -- Hook QuestInfo_Display so our sizes are re-applied every time the quest frame
 -- lays itself out. Installed lazily in case the function isn't a global yet.
 local hooked = false
@@ -89,11 +159,10 @@ local function TryHook()
     end
 end
 
--- The gossip frame (NPC dialog) was rewritten into a dynamic scroll list, so
--- there are no static FontStrings to target. Instead we locate the scroll box
--- and resize every FontString inside each currently visible element. Everything
--- is nil-guarded, so if Blizzard changes the layout this quietly does nothing
--- rather than erroring.
+-- The gossip frame (NPC dialog) is a dynamic scroll list with no static
+-- FontStrings to target, which is why we size the shared font objects instead.
+-- This locator is only used by `/pbqt debug` to inspect the live list; it is
+-- nil-guarded so a Blizzard layout change makes it quietly return nothing.
 local function GetGossipScrollBox()
     if not GossipFrame then return nil end
     local panel = GossipFrame.GreetingPanel
@@ -104,74 +173,48 @@ local function GetGossipScrollBox()
     return nil
 end
 
--- Resize every FontString on a single gossip scroll element (the greeting
--- paragraph, an option row, a quest row, etc.).
-local function ResizeGossipFrame(frame, size)
-    if not frame then return end
-    -- Button label (option / quest rows are buttons).
-    if frame.GetFontString then
-        ResizeFontString(frame:GetFontString(), size)
+-- Temporary diagnostic: with a gossip window open, `/pbqt debug` dumps the
+-- scroll box structure so we can see how each element's height/extent is
+-- determined and which font object it uses. Remove once the scroll issue is
+-- fixed.
+local function DebugGossip()
+    local scrollBox, panel = GetGossipScrollBox()
+    print("|cff33ff99PBQT debug|r  GossipFrame:", GossipFrame and "y" or "n",
+        "| scrollBox:", scrollBox and "y" or "n",
+        "| panel.GreetingText:", (panel and panel.GreetingText) and "y" or "n")
+    if not scrollBox then
+        print("  (open a gossip/NPC dialog window first)")
+        return
     end
-    -- Any other FontString regions on the element.
-    if frame.GetRegions then
-        for _, region in ipairs({ frame:GetRegions() }) do
-            if region.GetObjectType and region:GetObjectType() == "FontString" then
-                ResizeFontString(region, size)
+    local view = scrollBox.GetView and scrollBox:GetView()
+    print("  view extentCalculator:", (view and view.elementExtentCalculator ~= nil) and "YES" or "no",
+        "| scrollBox height:", scrollBox.GetHeight and math.floor(scrollBox:GetHeight() or 0))
+    if not scrollBox.GetFrames then return end
+    for i, f in ipairs(scrollBox:GetFrames()) do
+        print(("  [%d] %s h=%d"):format(i,
+            (f.GetObjectType and f:GetObjectType()) or "?",
+            math.floor((f.GetHeight and f:GetHeight()) or 0)))
+        if f.GetRegions then
+            for _, r in ipairs({ f:GetRegions() }) do
+                if r.GetObjectType and r:GetObjectType() == "FontString" then
+                    local _, sz = r:GetFont()
+                    local o = r.GetFontObject and r:GetFontObject()
+                    local txt = (r.GetText and r:GetText()) or ""
+                    print(("      FS obj=%s size=%s strH=%d txt=%q"):format(
+                        (o and o.GetName and o:GetName()) or "nil",
+                        tostring(sz),
+                        math.floor((r.GetStringHeight and r:GetStringHeight()) or 0),
+                        txt:sub(1, 20)))
+                end
             end
         end
     end
 end
 
-local gossipRelayout = false
-local function ResizeGossip()
-    local scrollBox, panel = GetGossipScrollBox()
-    local size = GetSize()
-
-    -- Greeting paragraph, if it's a standalone FontString on the panel.
-    if panel then
-        ResizeFontString(panel.GreetingText, size)
-    end
-
-    if not scrollBox then return end
-
-    if scrollBox.GetFrames then
-        for _, frame in ipairs(scrollBox:GetFrames()) do
-            ResizeGossipFrame(frame, size)
-        end
-    end
-
-    -- Re-run the scroll layout so element heights are re-measured against the
-    -- new (persistent) font sizes. Without this the taller greeting paragraph
-    -- overflows into the option rows anchored beneath it. Guarded so the
-    -- re-layout (which re-initializes frames) can't recurse.
-    if scrollBox.FullUpdate and not gossipRelayout then
-        gossipRelayout = true
-        scrollBox:FullUpdate(ScrollBoxConstants and ScrollBoxConstants.UpdateImmediately or true)
-        gossipRelayout = false
-    end
-end
-
-local gossipHooked = false
-local function TryHookGossip()
-    if gossipHooked then return end
-    if GossipFrame and type(GossipFrame.Update) == "function" then
-        hooksecurefunc(GossipFrame, "Update", ResizeGossip)
-        -- Resize each element as it's (re)initialized, so newly created or
-        -- recycled scroll frames carry the right font *before* they're measured.
-        local scrollBox = GetGossipScrollBox()
-        if scrollBox and ScrollUtil and ScrollUtil.AddInitializedFrameCallback then
-            ScrollUtil.AddInitializedFrameCallback(scrollBox, function(frame)
-                ResizeGossipFrame(frame, GetSize())
-            end, scrollBox, true)
-        end
-        gossipHooked = true
-    end
-end
-
 local function SetSize(n, announce)
     PBQT_DB.size = Clamp(n)
-    ApplyFontSizes()
-    ResizeGossip()
+    ApplyFontSizes()          -- quest frame FontStrings
+    ApplyFontObjects()        -- quest + gossip font objects (fixes gossip layout)
     if RefreshControls then RefreshControls() end
     if announce then
         print("|cff33ff99Pat's Bigger Quest Text|r: quest text size set to " .. PBQT_DB.size .. ".")
@@ -272,6 +315,11 @@ SlashCmdList["PBQT"] = function(msg)
         return
     end
 
+    if cmd == "debug" then
+        DebugGossip()
+        return
+    end
+
     if cmd == "scale" then
         local n = tonumber(rest)
         if n then
@@ -317,13 +365,16 @@ f:SetScript("OnEvent", function(_, event, arg1)
         BuildOptions()
         TryHook()
         ApplyFontSizes()
+        ApplyFontObjects() -- pre-size objects so the first gossip open is correct
         ApplyScale()
     elseif event == "GOSSIP_SHOW" then
-        -- NPC dialog is opening; hook re-renders, apply the window scale and
-        -- resize after this frame's layout completes.
-        TryHookGossip()
+        -- NPC dialog is opening. Size the font objects now: GossipFont and
+        -- friends may only have come into existence when Blizzard_GossipFrame
+        -- loaded, so login alone isn't guaranteed to have caught them. This is
+        -- a no-op once they already carry the right size, and it never calls
+        -- into Blizzard's layout code -- see the note above TryHook.
+        ApplyFontObjects()
         ApplyScale()
-        C_Timer.After(0, ResizeGossip)
     else
         -- A quest window is opening; make sure the hook is in place and the
         -- sizes are applied after Blizzard finishes its layout this frame.
